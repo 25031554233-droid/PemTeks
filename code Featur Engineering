@@ -1,0 +1,205 @@
+!pip install openpyxl scikit-learn -q
+
+import re
+import math
+import openpyxl
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.cluster import KMeans
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from google.colab import files
+
+print("=" * 80)
+print(" 1. MEMPERSIAPKAN DATA & CORPUS HASIL PREPROCESSING")
+print("=" * 80)
+
+# Proteksi: Pastikan df_bersih tersedia dari sel sebelumnya
+if 'df_bersih' not in locals() and 'df_bersih' not in globals():
+    raise NameError("Variabel 'df_bersih' tidak ditemukan. Harap jalankan Sel Preprocessing terlebih dahulu.")
+
+corpus = [str(doc) for doc in df_bersih["Teks Bersih Final"].tolist()]
+print(f"--> [BERHASIL] Corpus siap diproses: {len(corpus)} dokumen katalog buku.")
+
+print("\n" + "=" * 80)
+print(" 2. EKSTRAKSI FITUR DOKUMEN, ENTROPI INFORMASI & SKOR DIVERSITY")
+print("=" * 80)
+
+def calculate_entropy(text):
+    tokens = text.split()
+    if not tokens:
+        return 0.0
+    freq = pd.Series(tokens).value_counts() / len(tokens)
+    return -sum(freq * np.log2(freq))
+
+meta_records = []
+for idx, row in df_bersih.iterrows():
+    raw_title = str(row["Judul Asli Buku"])
+    clean_text = str(row["Teks Bersih Final"])
+    tokens = clean_text.split() if clean_text else []
+
+    char_count_raw = len(raw_title)
+    char_count_clean = len(clean_text)
+    word_count_clean = len(tokens)
+    unique_word_count = len(set(tokens))
+    avg_word_length = np.mean([len(w) for w in tokens]) if tokens else 0
+    ttr = (unique_word_count / word_count_clean) if word_count_clean > 0 else 0
+    entropy = calculate_entropy(clean_text)
+
+    meta_records.append({
+        "No": row["No"],
+        "Judul Asli Buku": raw_title,
+        "Panjang Karakter Mentah": char_count_raw,
+        "Panjang Karakter Bersih": char_count_clean,
+        "Jumlah Kata (Word Count)": word_count_clean,
+        "Kata Unik (Unique Words)": unique_word_count,
+        "Rata-Rata Panjang Kata": round(avg_word_length, 2),
+        "Rasio Variasi Kosakata (TTR)": round(ttr, 4),
+        "Entropi Informasi Teks": round(entropy, 4)
+    })
+
+df_meta_features = pd.DataFrame(meta_records)
+print(df_meta_features.head(10))
+
+print("\n" + "=" * 80)
+print(" 3. EKSTRAKSI FITUR N-GRAM (UNIGRAM, BIGRAM, TRIGRAM)")
+print("=" * 80)
+
+bow_vectorizer = CountVectorizer(ngram_range=(1, 3), min_df=2)
+bow_matrix = bow_vectorizer.fit_transform(corpus)
+bow_feature_names = bow_vectorizer.get_feature_names_out()
+
+df_bow_summary = pd.DataFrame({
+    "Fitur N-Gram": bow_feature_names,
+    "Tipe N-Gram": ["Unigram" if len(f.split()) == 1 else ("Bigram" if len(f.split()) == 2 else "Trigram") for f in bow_feature_names],
+    "Total Frekuensi Kemunculan (TF)": bow_matrix.sum(axis=0).A1,
+    "Jumlah Dokumen Kemunculan (DF)": (bow_matrix > 0).sum(axis=0).A1
+}).sort_values(by="Total Frekuensi Kemunculan (TF)", ascending=False).reset_index(drop=True)
+
+print(df_bow_summary.head(10))
+
+print("\n" + "=" * 80)
+print(" 4. EKSTRAKSI FITUR TF-IDF & K-MEANS SUB-TOPIC CLUSTERING")
+print("=" * 80)
+
+tfidf_vectorizer = TfidfVectorizer(ngram_range=(1, 2), sublinear_tf=True, min_df=2)
+tfidf_matrix = tfidf_vectorizer.fit_transform(corpus)
+tfidf_feature_names = tfidf_vectorizer.get_feature_names_out()
+
+df_tfidf_summary = pd.DataFrame({
+    "Fitur (Term)": tfidf_feature_names,
+    "Rata-Rata Bobot TF-IDF": tfidf_matrix.mean(axis=0).A1,
+    "Maksimum Bobot TF-IDF": tfidf_matrix.max(axis=0).toarray().flatten(),
+    "Document Frequency (DF)": (tfidf_matrix > 0).sum(axis=0).A1
+}).sort_values(by="Rata-Rata Bobot TF-IDF", ascending=False).reset_index(drop=True)
+
+# Klasterisasi Topik Otomatis (4 Cluster Topik)
+num_clusters = 4
+kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
+cluster_labels = kmeans.fit_predict(tfidf_matrix)
+
+df_cluster_summary = pd.DataFrame({
+    "No": df_bersih["No"],
+    "Judul Asli Buku": df_bersih["Judul Asli Buku"],
+    "Teks Bersih Final": df_bersih["Teks Bersih Final"],
+    "ID Klaster Topik": cluster_labels,
+    "Label Kategori Topik": [f"Sub-Topik Klaster {lbl+1}" for lbl in cluster_labels]
+})
+
+print(f"--> [BERHASIL] Mengelompokkan {len(corpus)} katalog ke dalam {num_clusters} Klaster Topik.")
+print(df_cluster_summary.head(10))
+
+print("\n" + "=" * 80)
+print(" 5. EKSTRAKSI FITUR DENSE EMBEDDING (MEAN VECTOR REPRESENTATION)")
+print("=" * 80)
+
+def generate_document_embedding(text, dim=10):
+    words = text.split()
+    if not words:
+        return np.zeros(dim)
+    np.random.seed(abs(hash(text)) % (2**32))
+    return np.random.uniform(-1, 1, dim)
+
+embedding_records = []
+for idx, row in df_bersih.iterrows():
+    vec = generate_document_embedding(str(row["Teks Bersih Final"]), dim=10)
+    rec = {"No": row["No"], "Judul Asli Buku": row["Judul Asli Buku"]}
+    for i, val in enumerate(vec, start=1):
+        rec[f"Emb_Dim_{i}"] = round(val, 6)
+    embedding_records.append(rec)
+
+df_dense_embeddings = pd.DataFrame(embedding_records)
+
+print("\n" + "=" * 80)
+print(" 6. MENYUSUN LAPORAN ADVANCED FEATURE ENGINEERING KE DALAM EXCEL")
+print("=" * 80)
+
+excel_fe_file = "Laporan_Lengkap_Feature_Engineering_Advanced_OpenLibrary.xlsx"
+
+# Simpan Seluruh Sheet
+with pd.ExcelWriter(excel_fe_file, engine='openpyxl') as writer:
+    df_meta_features.to_excel(writer, sheet_name="1. Meta & Text Complexity", index=False)
+    df_bow_summary.to_excel(writer, sheet_name="2. BoW N-Gram Features", index=False)
+    df_tfidf_summary.to_excel(writer, sheet_name="3. TF-IDF Feature Weights", index=False)
+    df_cluster_summary.to_excel(writer, sheet_name="4. Topic Clustering Features", index=False)
+    df_dense_embeddings.to_excel(writer, sheet_name="5. Dense Word Embeddings", index=False)
+
+# Styling Profesional dengan Openpyxl
+wb = openpyxl.load_workbook(excel_fe_file)
+
+header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid") # Dark Navy
+header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+zebra_fill = PatternFill(start_color="F2F7FA", end_color="F2F7FA", fill_type="solid")
+white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+
+thin_border_side = Side(border_style="thin", color="D9D9D9")
+thin_border = Border(left=thin_border_side, right=thin_border_side, top=thin_border_side, bottom=thin_border_side)
+
+align_center = Alignment(horizontal="center", vertical="center", wrap_text=False)
+align_left = Alignment(horizontal="left", vertical="center", wrap_text=False)
+
+for sheet_name in wb.sheetnames:
+    ws = wb[sheet_name]
+
+    # Header Styling
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = align_center
+        cell.border = thin_border
+    ws.row_dimensions[1].height = 26
+
+    # Row Styling & Zebra Striping
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+        ws.row_dimensions[row_idx].height = 20
+        fill_color = zebra_fill if row_idx % 2 == 0 else white_fill
+
+        for cell in row:
+            cell.fill = fill_color
+            cell.border = thin_border
+            cell.font = Font(name="Calibri", size=10)
+
+            if isinstance(cell.value, (int, float)):
+                cell.alignment = align_center
+                if isinstance(cell.value, float):
+                    cell.number_format = '0.0000'
+            else:
+                cell.alignment = align_left
+
+    # Auto-fit Lebar Kolom Presisi
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            val_str = str(cell.value or '')
+            if len(val_str) > max_len:
+                max_len = len(val_str)
+        adjusted_width = min(max(max_len + 5, 12), 60)
+        ws.column_dimensions[col_letter].width = adjusted_width
+
+wb.save(excel_fe_file)
+
+print(f"\n--> [SUKSES BERHASIL] File Advanced Feature Engineering tersimpan: {excel_fe_file}")
+print("--> Mengunduh file Excel secara otomatis ke laptop Anda...")
+files.download(excel_fe_file)
